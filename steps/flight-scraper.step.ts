@@ -611,7 +611,7 @@ export const handler: Handlers['FlightScraper'] = async (req, { logger }) => {
         }
         
         // Process return flights if round trip
-        const returnFlights: Array<{ id: string; flightNumber: string; airline: string; origin: string; destination: string; departureDate: string; departureTime: string; arrivalDate: string; arrivalTime: string; duration: number }> = [];
+        const returnFlights: Array<{ id: string; flightNumber: string; airline: string; origin: string; destination: string; departureDate: string; departureTime: string; arrivalDate: string; arrivalTime: string; duration: number; originalLegIndex: number }> = [];
         if (returnFlight && returnFlight.legs && returnFlight.legs.length > 0) {
           const returnSectionDate = convertDateToYYYYMMDD(returnFlight.date);
           for (let i = 0; i < returnFlight.legs.length; i++) {
@@ -655,7 +655,8 @@ export const handler: Handlers['FlightScraper'] = async (req, { logger }) => {
               departureTime,
               arrivalDate,
               arrivalTime: arrivalTime || departureTime,
-              duration: durationMinutes
+              duration: durationMinutes,
+              originalLegIndex: i // Store the original leg index
             });
           }
         }
@@ -691,7 +692,7 @@ export const handler: Handlers['FlightScraper'] = async (req, { logger }) => {
         const legData: Array<{ id: string; flight: any; inbound: boolean; connectionTime: number | null; order: number }> = [];
         
         // Generate outbound leg IDs and collect leg data
-        // Outbound legs have order 0, 1, 2, ... (increasing)
+        // Outbound legs have order 0, 1, 2, ... (within outbound group)
         for (let i = 0; i < outboundFlights.length; i++) {
           const flight = outboundFlights[i];
           const leg = outbound.legs[i];
@@ -704,26 +705,69 @@ export const handler: Handlers['FlightScraper'] = async (req, { logger }) => {
             flight: flight.id,
             inbound: false,
             connectionTime,
-            order: i // Outbound legs start at 0
+            order: i // Order within outbound group (0, 1, 2, ...)
           });
         }
         
         // Generate return leg IDs and collect leg data
-        // Return legs continue the order sequence after outbound legs
-        for (let i = 0; i < returnFlights.length; i++) {
-          const flight = returnFlights[i];
-          const leg = returnFlight!.legs[i];
-          // Parse connection time to integer minutes (or null)
-          const connectionTime = leg.connectionTime ? parseDurationToMinutes(leg.connectionTime) : null;
-          // Leg ID format: inbound_<flightId>_<tripId>
-          const legId = `inbound_${flight.id}_${tripId}`;
-          legData.push({
-            id: legId,
-            flight: flight.id,
-            inbound: true,
-            connectionTime,
-            order: outboundFlights.length + i // Return legs continue after outbound
-          });
+        // Return legs have order 0, 1, 2, ... (within inbound group)
+        // Create a map of originalLegIndex to flight for quick lookup
+        const returnFlightMap = new Map<number, typeof returnFlights[0]>();
+        for (const flight of returnFlights) {
+          returnFlightMap.set(flight.originalLegIndex, flight);
+        }
+        
+        // Iterate through ALL returnFlight.legs to ensure we don't miss any, even if validation failed
+        if (returnFlight && returnFlight.legs) {
+          for (let i = 0; i < returnFlight.legs.length; i++) {
+            const leg = returnFlight.legs[i];
+            const flight = returnFlightMap.get(i);
+            
+            // Create leg data for ALL legs, even if flight creation failed
+            if (flight) {
+              // We have a valid flight, use it
+              const connectionTime = leg.connectionTime ? parseDurationToMinutes(leg.connectionTime) : null;
+              const legId = `inbound_${flight.id}_${tripId}`;
+              legData.push({
+                id: legId,
+                flight: flight.id,
+                inbound: true,
+                connectionTime,
+                order: i // Order within inbound group (0, 1, 2, ...)
+              });
+            } else {
+              // Flight creation failed, but we still need to create the leg
+              // Generate a flight ID even if validation failed, using available data
+              const departureTime = parseTimeTo24Hour(leg.departure) || '00:00';
+              const returnSectionDate = convertDateToYYYYMMDD(returnFlight.date) || '';
+              const flightId = `${leg.flightNumber || 'UNKNOWN'}_${leg.origin || 'XXX'}_${returnSectionDate}_${departureTime}`;
+              
+              // Create the flight entry even if validation failed
+              const durationMinutes = leg.duration ? parseDurationToMinutes(leg.duration) : 0;
+              flightsToInsert.set(flightId, {
+                id: flightId,
+                flight_number: leg.flightNumber || '',
+                origin: leg.origin || '',
+                destination: leg.destination || '',
+                departure_date: returnSectionDate,
+                departure_time: departureTime,
+                arrival_date: returnSectionDate,
+                arrival_time: parseTimeTo24Hour(leg.arrival) || departureTime,
+                duration: durationMinutes,
+                airline: leg.airline || ''
+              });
+              
+              const connectionTime = leg.connectionTime ? parseDurationToMinutes(leg.connectionTime) : null;
+              const legId = `inbound_${flightId}_${tripId}`;
+              legData.push({
+                id: legId,
+                flight: flightId,
+                inbound: true,
+                connectionTime,
+                order: i // Order within inbound group (0, 1, 2, ...)
+              });
+            }
+          }
         }
         
         // Add legs to collection (Map ensures uniqueness by ID)

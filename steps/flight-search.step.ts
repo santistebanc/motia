@@ -258,6 +258,25 @@ export const handler: Handlers['FlightSearch'] = async (req, { logger }) => {
       }
     }
 
+    // Helper function to calculate total trip duration (outbound + return, including connection times)
+    const calculateTotalDuration = (trip: any): number => {
+      const outboundLegs = trip.legs.filter((leg: any) => !leg.inbound);
+      const returnLegs = trip.legs.filter((leg: any) => leg.inbound);
+      
+      // Calculate outbound total: sum of all leg durations + connection times
+      const outboundDuration = outboundLegs.reduce((total: number, leg: any) => {
+        return total + leg.flight.duration + (leg.connectionTime || 0);
+      }, 0);
+      
+      // Calculate return total: sum of all leg durations + connection times
+      const returnDuration = returnLegs.reduce((total: number, leg: any) => {
+        return total + leg.flight.duration + (leg.connectionTime || 0);
+      }, 0);
+      
+      // Return sum of both
+      return outboundDuration + returnDuration;
+    };
+
     // Transform trips with deals and legs
     const tripsWithDeals = Array.from(tripsMap.values()).map(trip => {
       // Sort deals by price
@@ -280,9 +299,18 @@ export const handler: Handlers['FlightSearch'] = async (req, { logger }) => {
       return trip;
     }).filter(trip => trip.legs.length > 0)
       .sort((a, b) => {
-        // Sort trips by lowest deal price
+        // Sort trips by lowest deal price first, then by total duration
         const minPriceA = Math.min(...a.deals.map((d: any) => d.price));
         const minPriceB = Math.min(...b.deals.map((d: any) => d.price));
+        
+        // If prices are equal, sort by total duration (shorter duration first)
+        // Total duration = sum of (outbound legs + connection times) + (return legs + connection times)
+        if (minPriceA === minPriceB) {
+          const totalDurationA = calculateTotalDuration(a);
+          const totalDurationB = calculateTotalDuration(b);
+          return totalDurationA - totalDurationB;
+        }
+        
         return minPriceA - minPriceB;
       });
 
