@@ -1,14 +1,32 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { z } from 'zod'
+
+const flightsSearchSchema = z.object({
+  origin: z.string().optional(),
+  destination: z.string().optional(),
+  departureDate: z.string().optional(),
+  returnDate: z.string().optional(),
+  isRoundTrip: z.union([z.string(), z.boolean()]).optional().transform((val) => {
+    if (typeof val === 'boolean') return val
+    return val === 'true'
+  }),
+  page: z.string().optional().transform((val) => {
+    if (!val) return 1
+    const parsed = parseInt(val, 10)
+    return isNaN(parsed) || parsed < 1 ? 1 : parsed
+  }),
+})
 
 export const Route = createFileRoute('/flights')({
   component: FlightsPage,
+  validateSearch: flightsSearchSchema,
 })
 
 interface Flight {
-  id: number
+  id: string
   flightNumber: string
   airline: string
   origin: string
@@ -21,14 +39,14 @@ interface Flight {
 }
 
 interface Leg {
-  id: number
+  id: string
   inbound: boolean
   connectionTime: number | null
   flight: Flight
 }
 
 interface TripWithDeals {
-  tripId: number
+  tripId: string
   origin: string
   destination: string
   stopCount: number
@@ -40,7 +58,7 @@ interface TripWithDeals {
   returnTime: string | null
   legs: Leg[]
   deals: Array<{
-    id: number
+    id: string
     source: string
     provider: string
     price: number
@@ -50,21 +68,228 @@ interface TripWithDeals {
 }
 
 function FlightsPage() {
-  const [origin, setOrigin] = useState('')
-  const [destination, setDestination] = useState('')
-  const [departureDate, setDepartureDate] = useState('')
-  const [returnDate, setReturnDate] = useState('')
-  const [isRoundTrip, setIsRoundTrip] = useState(false)
+  const navigate = Route.useNavigate()
+  const search = Route.useSearch()
+  
+  // Use URL params as source of truth
+  const origin = search.origin || ''
+  const destination = search.destination || ''
+  const departureDate = search.departureDate || ''
+  const returnDate = search.returnDate || ''
+  const isRoundTrip = search.isRoundTrip || false
+  const currentPage = search.page || 1
+  const itemsPerPage = 10
+  
   const [loading, setLoading] = useState(false)
+  const [searchingLoading, setSearchingLoading] = useState(false)
   const [tripsWithDeals, setTripsWithDeals] = useState<TripWithDeals[]>([])
   const [error, setError] = useState('')
   const [selectedTripForDeals, setSelectedTripForDeals] = useState<TripWithDeals | null>(null)
+  const [clearing, setClearing] = useState(false)
+  const lastSearchedParams = useRef<string>('')
 
-  const handleSearch = async () => {
-    if (!origin || !destination || !departureDate) {
-      setError('Please fill in origin, destination, and departure date')
+  // Calculate pagination
+  const totalPages = Math.ceil(tripsWithDeals.length / itemsPerPage)
+  const startIndex = (currentPage - 1) * itemsPerPage
+  const endIndex = startIndex + itemsPerPage
+  const paginatedTrips = tripsWithDeals.slice(startIndex, endIndex)
+
+  // Reset to page 1 when search params change (but not when just page changes)
+  const prevSearchKey = useRef<string>('')
+  useEffect(() => {
+    const searchKey = `${origin}|${destination}|${departureDate}|${returnDate}|${isRoundTrip}`
+    if (searchKey !== prevSearchKey.current && prevSearchKey.current !== '') {
+      // Search params changed, reset to page 1
+      if (currentPage !== 1) {
+        navigate({
+          search: (prev) => ({
+            ...prev,
+            page: undefined, // Remove page param (defaults to 1)
+          }),
+          replace: true,
+        })
+      }
+    }
+    prevSearchKey.current = searchKey
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [origin, destination, departureDate, returnDate, isRoundTrip])
+
+  const setPage = (page: number) => {
+    updateSearchParams({ page: page.toString() })
+  }
+
+  // Update URL when form values change
+  const updateSearchParams = (updates: {
+    origin?: string
+    destination?: string
+    departureDate?: string
+    returnDate?: string
+    isRoundTrip?: boolean
+    page?: string | number
+  }) => {
+    navigate({
+      search: (prev) => {
+        const newSearch: any = {
+          ...prev,
+          ...updates,
+        }
+        // Serialize isRoundTrip as string for URL
+        if (updates.isRoundTrip !== undefined) {
+          newSearch.isRoundTrip = updates.isRoundTrip ? 'true' : undefined
+        }
+        // Remove returnDate if not round trip
+        if (updates.isRoundTrip === false) {
+          newSearch.returnDate = undefined
+        } else if (updates.returnDate !== undefined) {
+          newSearch.returnDate = updates.returnDate
+        }
+        // Handle page parameter
+        if (updates.page !== undefined) {
+          newSearch.page = updates.page === 1 ? undefined : updates.page.toString()
+        }
+        return newSearch
+      },
+      replace: true,
+    })
+  }
+
+  const setOrigin = (value: string) => updateSearchParams({ origin: value })
+  const setDestination = (value: string) => updateSearchParams({ destination: value })
+  const setDepartureDate = (value: string) => updateSearchParams({ departureDate: value })
+  const setReturnDate = (value: string) => updateSearchParams({ returnDate: value })
+  const setIsRoundTrip = (value: boolean) => {
+    updateSearchParams({ 
+      isRoundTrip: value,
+      returnDate: value ? returnDate : undefined,
+    })
+  }
+
+  // Validate search parameters
+  const validateSearchParams = (): string | null => {
+    if (!origin || origin.length < 3) {
+      return 'Origin must be at least 3 characters'
+    }
+    if (!destination || destination.length < 3) {
+      return 'Destination must be at least 3 characters'
+    }
+    if (!departureDate) {
+      return 'Departure date is required'
+    }
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/
+    if (!dateRegex.test(departureDate)) {
+      return 'Departure date must be in YYYY-MM-DD format'
+    }
+    // If round trip, validate return date
+    if (isRoundTrip) {
+      if (!returnDate) {
+        return 'Return date is required for round trips'
+      }
+      if (!dateRegex.test(returnDate)) {
+        return 'Return date must be in YYYY-MM-DD format'
+      }
+      // Validate return date is after departure date
+      if (new Date(returnDate) < new Date(departureDate)) {
+        return 'Return date must be after departure date'
+      }
+    }
+    return null
+  }
+
+  // Auto-search when URL params are present, valid, and have changed
+  useEffect(() => {
+    // Create a key from the search params
+    const searchKey = `${origin}|${destination}|${departureDate}|${returnDate}|${isRoundTrip}`
+    
+    // Validate before attempting to search
+    const validationError = validateSearchParams()
+    if (validationError) {
+      lastSearchedParams.current = ''
+      if (origin || destination || departureDate) {
+        // Only set error if user has started filling the form
+        setError(validationError)
+      }
       return
     }
+    
+    // Clear any previous errors if validation passes
+    setError('')
+    
+    // Only search if:
+    // 1. Validation passed
+    // 2. The params have changed from the last search
+    // 3. We're not currently loading (full fetch) or searching (database query)
+    const shouldAutoSearch = 
+      searchKey !== lastSearchedParams.current &&
+      !loading &&
+      !searchingLoading
+
+    if (shouldAutoSearch) {
+      lastSearchedParams.current = searchKey
+      handleSearchOnly()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [origin, destination, departureDate, returnDate, isRoundTrip, loading, searchingLoading])
+
+  // Search only (query database, no scraping)
+  const handleSearchOnly = async () => {
+    // Validate before querying
+    const validationError = validateSearchParams()
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+
+    setSearchingLoading(true)
+    setError('')
+
+    try {
+      const requestBody: any = {
+        origin,
+        destination,
+        departureDate,
+      }
+
+      if (isRoundTrip && returnDate) {
+        requestBody.returnDate = returnDate
+      }
+
+      // Fetch the results from the database
+      const searchResponse = await fetch('/api/flights/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      })
+
+      const searchData = await searchResponse.json()
+
+      if (searchData.success) {
+        setTripsWithDeals(searchData.tripsWithDeals || [])
+      } else {
+        setError(searchData.error || 'Failed to fetch flights')
+      }
+    } catch (err) {
+      console.error('Error searching flights:', err)
+      setError('Failed to search flights. Please try again.')
+    } finally {
+      setSearchingLoading(false)
+    }
+  }
+
+  // Full search with scraping (when user clicks button)
+  const handleSearch = async () => {
+    // Validate before fetching
+    const validationError = validateSearchParams()
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+
+    // Update the last searched params
+    const searchKey = `${origin}|${destination}|${departureDate}|${returnDate}|${isRoundTrip}`
+    lastSearchedParams.current = searchKey
 
     setLoading(true)
     setError('')
@@ -81,7 +306,8 @@ function FlightsPage() {
         requestBody.returnDate = returnDate
       }
 
-      const response = await fetch('/api/flights/search', {
+      // First, call the scraper endpoint to scrape flights from Skyscanner
+      const scrapeResponse = await fetch('/api/flights/scrape', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -89,12 +315,28 @@ function FlightsPage() {
         body: JSON.stringify(requestBody),
       })
 
-      const data = await response.json()
+      const scrapeData = await scrapeResponse.json()
 
-      if (data.success) {
-        setTripsWithDeals(data.tripsWithDeals || [])
+      if (!scrapeData.success) {
+        setError(scrapeData.error || 'Failed to scrape flights')
+        return
+      }
+
+      // After scraping, fetch the results from the database
+      const searchResponse = await fetch('/api/flights/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      })
+
+      const searchData = await searchResponse.json()
+
+      if (searchData.success) {
+        setTripsWithDeals(searchData.tripsWithDeals || [])
       } else {
-        setError(data.error || 'Failed to search flights')
+        setError(searchData.error || 'Failed to fetch flights')
       }
     } catch (err) {
       console.error('Error searching flights:', err)
@@ -112,10 +354,52 @@ function FlightsPage() {
     })
   }
 
+  const formatTime = (timeString: string) => {
+    // Remove seconds if present (format: HH:MM:SS -> HH:MM)
+    if (timeString && timeString.includes(':')) {
+      const parts = timeString.split(':')
+      return `${parts[0]}:${parts[1]}`
+    }
+    return timeString
+  }
+
   const formatDuration = (minutes: number) => {
     const hours = Math.floor(minutes / 60)
     const mins = minutes % 60
     return `${hours}h ${mins}m`
+  }
+
+  const handleClearTables = async () => {
+    if (!confirm('Are you sure you want to clear all flight data from the database? This action cannot be undone.')) {
+      return
+    }
+
+    setClearing(true)
+    setError('')
+
+    try {
+      const response = await fetch('/api/flights/clear', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      })
+
+      const data = await response.json()
+
+      if (data.success) {
+        setTripsWithDeals([])
+        alert(`Tables cleared successfully!\n\nDeleted:\n- ${data.deleted.deals} deals\n- ${data.deleted.legs} legs\n- ${data.deleted.trips} trips\n- ${data.deleted.flights} flights`)
+      } else {
+        setError(data.error || 'Failed to clear tables')
+      }
+    } catch (err) {
+      console.error('Error clearing tables:', err)
+      setError('Failed to clear tables. Please try again.')
+    } finally {
+      setClearing(false)
+    }
   }
 
   const TripCard = ({ trip }: { trip: TripWithDeals }) => {
@@ -163,7 +447,7 @@ function FlightsPage() {
               const firstOutboundLeg = outboundLegs[0];
               return (
                 <div className="text-sm font-semibold text-gray-700 mb-3">
-                  Outbound • <span className="text-blue-600">{formatDate(firstOutboundLeg.flight.departureDate)}</span> <span className="text-purple-600">{firstOutboundLeg.flight.departureTime}</span> • <span className="text-orange-600">{formatDuration(outboundDuration)}</span>
+                  Outbound • <span className="text-blue-600">{formatDate(firstOutboundLeg.flight.departureDate)}</span> <span className="text-purple-600">{formatTime(firstOutboundLeg.flight.departureTime)}</span> • <span className="text-orange-600">{formatDuration(outboundDuration)}</span>
                 </div>
               );
             })()}
@@ -181,13 +465,13 @@ function FlightsPage() {
                       </div>
                       <div className="flex items-center gap-4 text-sm">
                         <div>
-                          <div className="font-semibold text-purple-600">{leg.flight.departureTime}</div>
+                          <div className="font-semibold text-purple-600">{formatTime(leg.flight.departureTime)}</div>
                           <div className="text-gray-600">{leg.flight.origin}</div>
                           <div className="text-xs text-blue-600">{formatDate(leg.flight.departureDate)}</div>
                         </div>
                         <div className="flex-1 text-center text-gray-400">→</div>
                         <div>
-                          <div className="font-semibold text-purple-600">{leg.flight.arrivalTime}</div>
+                          <div className="font-semibold text-purple-600">{formatTime(leg.flight.arrivalTime)}</div>
                           <div className="text-gray-600">{leg.flight.destination}</div>
                           <div className="text-xs text-blue-600">{formatDate(leg.flight.arrivalDate)}</div>
                         </div>
@@ -214,7 +498,7 @@ function FlightsPage() {
               const firstReturnLeg = returnLegs[0];
               return (
                 <div className="text-sm font-semibold text-gray-700 mb-3">
-                  Return • <span className="text-blue-600">{formatDate(firstReturnLeg.flight.departureDate)}</span> <span className="text-purple-600">{firstReturnLeg.flight.departureTime}</span> • <span className="text-orange-600">{formatDuration(returnDuration)}</span>
+                  Return • <span className="text-blue-600">{formatDate(firstReturnLeg.flight.departureDate)}</span> <span className="text-purple-600">{formatTime(firstReturnLeg.flight.departureTime)}</span> • <span className="text-orange-600">{formatDuration(returnDuration)}</span>
                 </div>
               );
             })()}
@@ -232,13 +516,13 @@ function FlightsPage() {
                       </div>
                       <div className="flex items-center gap-4 text-sm">
                         <div>
-                          <div className="font-semibold text-purple-600">{leg.flight.departureTime}</div>
+                          <div className="font-semibold text-purple-600">{formatTime(leg.flight.departureTime)}</div>
                           <div className="text-gray-600">{leg.flight.origin}</div>
                           <div className="text-xs text-blue-600">{formatDate(leg.flight.departureDate)}</div>
                         </div>
                         <div className="flex-1 text-center text-gray-400">→</div>
                         <div>
-                          <div className="font-semibold text-purple-600">{leg.flight.arrivalTime}</div>
+                          <div className="font-semibold text-purple-600">{formatTime(leg.flight.arrivalTime)}</div>
                           <div className="text-gray-600">{leg.flight.destination}</div>
                           <div className="text-xs text-blue-600">{formatDate(leg.flight.arrivalDate)}</div>
                         </div>
@@ -263,7 +547,17 @@ function FlightsPage() {
   return (
     <div className="min-h-screen bg-gray-50 p-8">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold mb-8">Flight Search</h1>
+        <div className="flex items-center justify-between mb-8">
+          <h1 className="text-3xl font-bold">Flight Search</h1>
+          <Button 
+            onClick={handleClearTables} 
+            disabled={loading || clearing}
+            variant="destructive"
+            size="sm"
+          >
+            {clearing ? 'Clearing...' : 'Clear Data'}
+          </Button>
+        </div>
         
         {/* Search Form */}
         <div className="bg-white rounded-lg shadow-md p-6 mb-8">
@@ -333,10 +627,10 @@ function FlightsPage() {
           
           <Button 
             onClick={handleSearch} 
-            disabled={loading}
+            disabled={loading || clearing}
             className="w-full md:w-auto"
           >
-            {loading ? 'Searching...' : 'Search Flights'}
+            {loading ? 'Fetching...' : 'Fetch'}
           </Button>
           
           {error && (
@@ -347,22 +641,88 @@ function FlightsPage() {
         </div>
 
         {/* Results */}
-        {tripsWithDeals.length > 0 && (
-          <div>
-            <h2 className="text-2xl font-semibold mb-4">
-              Available Trips with Deals {departureDate && `- ${formatDate(departureDate)}`}
-            </h2>
-            <div className="space-y-4">
-              {tripsWithDeals.map((trip) => (
-                <TripCard key={trip.tripId} trip={trip} />
-              ))}
+        {searchingLoading && (
+          <div className="text-center text-gray-500 py-12">
+            <div className="flex items-center justify-center gap-1 mb-4">
+              <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+              <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+              <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
             </div>
+            <div>Loading results...</div>
           </div>
         )}
 
-        {!loading && tripsWithDeals.length === 0 && !error && (
+        {!searchingLoading && tripsWithDeals.length > 0 && (
+          <div>
+            <div className="flex items-center justify-end mb-4">
+              <div className="text-sm text-gray-600">
+                Showing {startIndex + 1}-{Math.min(endIndex, tripsWithDeals.length)} of {tripsWithDeals.length}
+              </div>
+            </div>
+            <div className="space-y-4">
+              {paginatedTrips.map((trip) => (
+                <TripCard key={trip.tripId} trip={trip} />
+              ))}
+            </div>
+            
+            {/* Pagination Controls */}
+            {totalPages > 1 && (
+              <div className="flex items-center justify-center gap-2 mt-8">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage(currentPage - 1)}
+                  disabled={currentPage === 1}
+                >
+                  Previous
+                </Button>
+                
+                <div className="flex items-center gap-1">
+                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => {
+                    // Show first page, last page, current page, and pages around current
+                    const showPage = 
+                      pageNum === 1 ||
+                      pageNum === totalPages ||
+                      (pageNum >= currentPage - 1 && pageNum <= currentPage + 1)
+                    
+                    if (!showPage) {
+                      // Show ellipsis
+                      if (pageNum === currentPage - 2 || pageNum === currentPage + 2) {
+                        return <span key={pageNum} className="px-2">...</span>
+                      }
+                      return null
+                    }
+                    
+                    return (
+                      <Button
+                        key={pageNum}
+                        variant={currentPage === pageNum ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => setPage(pageNum)}
+                        className="min-w-10"
+                      >
+                        {pageNum}
+                      </Button>
+                    )
+                  })}
+                </div>
+                
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage(currentPage + 1)}
+                  disabled={currentPage === totalPages}
+                >
+                  Next
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!loading && !searchingLoading && tripsWithDeals.length === 0 && !error && (
           <div className="text-center text-gray-500 py-12">
-            Enter your search criteria and click "Search Flights" to see results
+            Enter your search criteria and click "Fetch" to see results
           </div>
         )}
 
@@ -405,9 +765,6 @@ function FlightsPage() {
                               {deal.price === minPrice && (
                                 <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">Best</span>
                               )}
-                            </div>
-                            <div className="text-xs text-gray-500 mt-1">
-                              Expires: {formatDate(deal.expiryDate)}
                             </div>
                           </div>
                           <div className="flex items-center gap-3">
