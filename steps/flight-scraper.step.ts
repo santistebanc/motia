@@ -4,6 +4,12 @@ import { createClient } from '@supabase/supabase-js';
 import * as cheerio from 'cheerio';
 import { createHash } from 'crypto';
 
+// Generate a deterministic ID from search parameters
+function generateQueryId(origin: string, destination: string, departureDate: string, returnDate?: string): string {
+  const params = `${origin.toUpperCase()}|${destination.toUpperCase()}|${departureDate}|${returnDate || ''}`;
+  return createHash('sha256').update(params).digest('hex');
+}
+
 const scraperSchema = z.object({
   origin: z.string().min(3, 'Origin must be at least 3 characters'),
   destination: z.string().min(3, 'Destination must be at least 3 characters'),
@@ -830,6 +836,29 @@ export const handler: Handlers['FlightScraper'] = async (req, { logger }) => {
     }
     
     const tripsScraped = tripsToInsert.size;
+    
+    // Create or update fetchQueries entry
+    const queryId = generateQueryId(origin, destination, departureDate, returnDate);
+    const fetchTimestamp = new Date().toISOString();
+    const { error: fetchQueryError } = await supabase
+      .from('fetch_queries')
+      .upsert({
+        id: queryId,
+        origin: origin.toUpperCase(),
+        destination: destination.toUpperCase(),
+        departure_date: departureDate,
+        return_date: returnDate || null,
+        last_fetched: fetchTimestamp,
+        updated_at: fetchTimestamp,
+      }, {
+        onConflict: 'id',
+      });
+    
+    if (fetchQueryError) {
+      logger.error('Failed to update fetch_queries', { error: fetchQueryError });
+    } else {
+      logger.info('Updated fetch_queries', { queryId, lastFetched: fetchTimestamp });
+    }
     
     logger.info('Scraping complete', { tripsScraped });
     

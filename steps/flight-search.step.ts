@@ -1,6 +1,7 @@
 import type { ApiRouteConfig, Handlers } from 'motia';
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
+import { createHash } from 'crypto';
 
 const flightSearchSchema = z.object({
   origin: z.string().min(3, 'Origin must be at least 3 characters'),
@@ -8,6 +9,12 @@ const flightSearchSchema = z.object({
   departureDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Departure date must be in YYYY-MM-DD format'),
   returnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Return date must be in YYYY-MM-DD format').optional(),
 });
+
+// Generate a deterministic ID from search parameters
+function generateQueryId(origin: string, destination: string, departureDate: string, returnDate?: string): string {
+  const params = `${origin.toUpperCase()}|${destination.toUpperCase()}|${departureDate}|${returnDate || ''}`;
+  return createHash('sha256').update(params).digest('hex');
+}
 
 export const config: ApiRouteConfig = {
   name: 'FlightSearch',
@@ -21,6 +28,7 @@ export const config: ApiRouteConfig = {
   responseSchema: {
     200: z.object({
       success: z.boolean(),
+      lastFetched: z.string().nullable(),
       tripsWithDeals: z.array(z.object({
         tripId: z.string(),
         origin: z.string(),
@@ -95,6 +103,16 @@ export const handler: Handlers['FlightSearch'] = async (req, { logger }) => {
       }
     });
 
+    // Query fetchQueries to get last_fetched timestamp
+    const queryId = generateQueryId(origin, destination, departureDate, returnDate);
+    const { data: fetchQueryData } = await supabase
+      .from('fetch_queries')
+      .select('last_fetched')
+      .eq('id', queryId)
+      .single();
+
+    const lastFetched = fetchQueryData?.last_fetched || null;
+
     // Query deals filtered by search criteria
     let dealsQuery = supabase
       .from('deals')
@@ -127,6 +145,7 @@ export const handler: Handlers['FlightSearch'] = async (req, { logger }) => {
         status: 200,
         body: {
           success: true,
+          lastFetched,
           tripsWithDeals: [],
         },
       };
@@ -271,6 +290,7 @@ export const handler: Handlers['FlightSearch'] = async (req, { logger }) => {
       status: 200,
       body: {
         success: true,
+        lastFetched,
         tripsWithDeals,
       },
     };

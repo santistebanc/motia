@@ -86,6 +86,7 @@ function FlightsPage() {
   const [error, setError] = useState('')
   const [selectedTripForDeals, setSelectedTripForDeals] = useState<TripWithDeals | null>(null)
   const [clearing, setClearing] = useState(false)
+  const [lastFetched, setLastFetched] = useState<string | null>(null)
   const lastSearchedParams = useRef<string>('')
 
   // Calculate pagination
@@ -330,6 +331,7 @@ function FlightsPage() {
 
       if (searchData.success) {
         setTripsWithDeals(searchData.tripsWithDeals || [])
+        setLastFetched(searchData.lastFetched || null)
       } else {
         setError(searchData.error || 'Failed to fetch flights')
       }
@@ -398,6 +400,7 @@ function FlightsPage() {
 
       if (searchData.success) {
         setTripsWithDeals(searchData.tripsWithDeals || [])
+        setLastFetched(searchData.lastFetched || null)
       } else {
         setError(searchData.error || 'Failed to fetch flights')
       }
@@ -407,6 +410,22 @@ function FlightsPage() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const formatLastFetched = (timestamp: string | null) => {
+    if (!timestamp) return null
+    const date = new Date(timestamp)
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+    const diffHours = Math.floor(diffMs / 3600000)
+    const diffDays = Math.floor(diffMs / 86400000)
+    
+    if (diffMins < 1) return 'Just now'
+    if (diffMins < 60) return `${diffMins}m ago`
+    if (diffHours < 24) return `${diffHours}h ago`
+    if (diffDays < 7) return `${diffDays}d ago`
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined })
   }
 
   const formatDate = (dateString: string) => {
@@ -695,13 +714,20 @@ function FlightsPage() {
             </label>
           </div>
           
-          <Button 
-            onClick={handleSearch} 
-            disabled={loading || clearing}
-            className="w-full md:w-auto"
-          >
-            {loading ? 'Fetching...' : 'Fetch'}
-          </Button>
+          <div className="flex items-center gap-3">
+            <Button 
+              onClick={handleSearch} 
+              disabled={loading || clearing}
+              className="w-full md:w-auto"
+            >
+              {loading ? 'Fetching...' : 'Fetch'}
+            </Button>
+            {lastFetched && (
+              <span className="text-xs text-gray-500">
+                Last fetched: {formatLastFetched(lastFetched)}
+              </span>
+            )}
+          </div>
           
           {error && (
             <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
