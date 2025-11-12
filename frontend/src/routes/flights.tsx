@@ -13,10 +13,10 @@ const flightsSearchSchema = z.object({
     if (typeof val === 'boolean') return val
     return val === 'true'
   }),
-  page: z.string().optional().transform((val) => {
+  page: z.union([z.string(), z.number()]).optional().transform((val) => {
     if (!val) return 1
-    const parsed = parseInt(val, 10)
-    return isNaN(parsed) || parsed < 1 ? 1 : parsed
+    const num = typeof val === 'number' ? val : parseInt(val, 10)
+    return isNaN(num) || num < 1 ? 1 : num
   }),
 })
 
@@ -116,6 +116,69 @@ function FlightsPage() {
 
   const setPage = (page: number) => {
     updateSearchParams({ page: page.toString() })
+  }
+
+  // Pagination controls component
+  const PaginationControls = () => {
+    return (
+      <div className="flex items-center justify-between gap-4">
+        <div className="text-sm text-gray-600">
+          Showing {startIndex + 1}-{Math.min(endIndex, tripsWithDeals.length)} of {tripsWithDeals.length}
+        </div>
+        
+        {totalPages > 1 && (
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage(currentPage - 1)}
+              disabled={currentPage === 1}
+            >
+              Previous
+            </Button>
+            
+            <div className="flex items-center gap-1">
+              {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => {
+                // Show first page, last page, current page, and pages around current
+                const showPage = 
+                  pageNum === 1 ||
+                  pageNum === totalPages ||
+                  (pageNum >= currentPage - 1 && pageNum <= currentPage + 1)
+                
+                if (!showPage) {
+                  // Show ellipsis
+                  if (pageNum === currentPage - 2 || pageNum === currentPage + 2) {
+                    return <span key={pageNum} className="px-2">...</span>
+                  }
+                  return null
+                }
+                
+                return (
+                  <Button
+                    key={pageNum}
+                    variant={currentPage === pageNum ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setPage(pageNum)}
+                    className="min-w-10"
+                  >
+                    {pageNum}
+                  </Button>
+                )
+              })}
+            </div>
+            
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage(currentPage + 1)}
+              disabled={currentPage === totalPages}
+            >
+              Next
+            </Button>
+          </div>
+        )}
+      </div>
+    )
   }
 
   // Update URL when form values change
@@ -403,35 +466,38 @@ function FlightsPage() {
   }
 
   const TripCard = ({ trip }: { trip: TripWithDeals }) => {
+    const [outboundOpen, setOutboundOpen] = useState(false)
+    const [returnOpen, setReturnOpen] = useState(false)
+    
     const minPrice = Math.min(...trip.deals.map(d => d.price))
     const outboundLegs = trip.legs.filter(leg => !leg.inbound)
     const returnLegs = trip.legs.filter(leg => leg.inbound)
 
     return (
-      <div className="border rounded-lg p-6 hover:shadow-lg transition-shadow bg-white">
+      <div className="border rounded-lg p-4 hover:shadow-lg transition-shadow bg-white">
         {/* Header with trip info */}
-        <div className="mb-6 pb-4 border-b">
-          <div className="flex justify-between items-start mb-2">
-            <div>
-              <div className="text-lg font-semibold mb-1">
+        <div className="mb-3 pb-3 border-b">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-3">
+              <div className="text-base font-semibold">
                 {trip.isRound ? (
                   <>{trip.origin} ⇄ {trip.destination}</>
                 ) : (
                   <>{trip.origin} → {trip.destination}</>
                 )}
               </div>
-              <div className="text-sm text-gray-600">
+              <div className="text-xs text-gray-500">
                 {trip.stopCount === 0 ? 'Direct' : `${trip.stopCount} stop${trip.stopCount > 1 ? 's' : ''}`}
               </div>
             </div>
             <div className="text-right">
               <button
                 onClick={() => setSelectedTripForDeals(trip)}
-                className="text-2xl font-bold text-green-600 hover:text-green-700 cursor-pointer transition-colors"
+                className="text-xl font-bold text-green-600 hover:text-green-700 cursor-pointer transition-colors"
               >
                 ${minPrice}
               </button>
-              <div className="text-xs text-gray-500 mt-1 cursor-pointer hover:text-gray-700" onClick={() => setSelectedTripForDeals(trip)}>
+              <div className="text-xs text-gray-500 cursor-pointer hover:text-gray-700" onClick={() => setSelectedTripForDeals(trip)}>
                 {trip.deals.length} deal{trip.deals.length > 1 ? 's' : ''}
               </div>
             </div>
@@ -440,103 +506,107 @@ function FlightsPage() {
 
         {/* Outbound Legs */}
         {outboundLegs.length > 0 && (
-          <div className="mb-6">
+          <div className="mb-3">
             {(() => {
               const outboundDuration = outboundLegs.reduce((total, leg) => total + leg.flight.duration, 0) +
                 outboundLegs.reduce((total, leg) => total + (leg.connectionTime || 0), 0);
               const firstOutboundLeg = outboundLegs[0];
               return (
-                <div className="text-sm font-semibold text-gray-700 mb-3">
-                  Outbound • <span className="text-blue-600">{formatDate(firstOutboundLeg.flight.departureDate)}</span> <span className="text-purple-600">{formatTime(firstOutboundLeg.flight.departureTime)}</span> • <span className="text-orange-600">{formatDuration(outboundDuration)}</span>
-                </div>
+                <button
+                  onClick={() => setOutboundOpen(!outboundOpen)}
+                  className="w-full flex items-center justify-between text-xs font-semibold text-gray-700 mb-2 hover:text-gray-900 transition-colors"
+                >
+                  <span>
+                    Outbound • <span className="text-blue-600">{formatDate(firstOutboundLeg.flight.departureDate)}</span> <span className="text-purple-600">{formatTime(firstOutboundLeg.flight.departureTime)}</span> • <span className="text-orange-600">{formatDuration(outboundDuration)}</span>
+                  </span>
+                  <span className="text-gray-400 text-xs">{outboundOpen ? '▼' : '▶'}</span>
+                </button>
               );
             })()}
-            <div className="space-y-3">
-              {outboundLegs.map((leg, idx) => (
-                <div key={leg.id} className="pl-4 border-l-2 border-blue-200">
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <div className="font-semibold">{leg.flight.airline}</div>
-                        <div className="text-sm text-gray-600">{leg.flight.flightNumber}</div>
-                        <div className="text-xs text-orange-600">
-                          {formatDuration(leg.flight.duration)}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4 text-sm">
-                        <div>
-                          <div className="font-semibold text-purple-600">{formatTime(leg.flight.departureTime)}</div>
-                          <div className="text-gray-600">{leg.flight.origin}</div>
-                          <div className="text-xs text-blue-600">{formatDate(leg.flight.departureDate)}</div>
-                        </div>
-                        <div className="flex-1 text-center text-gray-400">→</div>
-                        <div>
-                          <div className="font-semibold text-purple-600">{formatTime(leg.flight.arrivalTime)}</div>
-                          <div className="text-gray-600">{leg.flight.destination}</div>
-                          <div className="text-xs text-blue-600">{formatDate(leg.flight.arrivalDate)}</div>
-                        </div>
+            {outboundOpen && (
+              <div className="space-y-2">
+                {outboundLegs.map((leg, idx) => (
+                  <div key={leg.id} className="pl-3 border-l-2 border-blue-200">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="text-xs font-semibold">{leg.flight.airline}</div>
+                      <div className="text-xs text-gray-500">{leg.flight.flightNumber}</div>
+                      <div className="text-xs text-orange-600">
+                        {formatDuration(leg.flight.duration)}
                       </div>
                     </div>
+                    <div className="flex items-center gap-3 text-xs">
+                      <div className="flex items-center gap-1">
+                        <span className="font-semibold text-purple-600">{formatTime(leg.flight.departureTime)}</span>
+                        <span className="text-gray-600">{leg.flight.origin}</span>
+                      </div>
+                      <span className="text-gray-400">→</span>
+                      <div className="flex items-center gap-1">
+                        <span className="font-semibold text-purple-600">{formatTime(leg.flight.arrivalTime)}</span>
+                        <span className="text-gray-600">{leg.flight.destination}</span>
+                      </div>
+                    </div>
+                    {leg.connectionTime !== null && idx < outboundLegs.length - 1 && (
+                      <div className="mt-1 text-xs text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded inline-block">
+                        Wait: {Math.floor(leg.connectionTime / 60)}h {leg.connectionTime % 60}m at {leg.flight.destination}
+                      </div>
+                    )}
                   </div>
-                  {leg.connectionTime !== null && idx < outboundLegs.length - 1 && (
-                    <div className="mt-3 text-xs text-orange-600 bg-orange-50 px-2 py-1 rounded inline-block">
-                      Wait time: {Math.floor(leg.connectionTime / 60)}h {leg.connectionTime % 60}m at {leg.flight.destination}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
         {/* Return Legs */}
         {returnLegs.length > 0 && (
-          <div className="mb-6">
+          <div className="mb-3">
             {(() => {
               const returnDuration = returnLegs.reduce((total, leg) => total + leg.flight.duration, 0) +
                 returnLegs.reduce((total, leg) => total + (leg.connectionTime || 0), 0);
               const firstReturnLeg = returnLegs[0];
               return (
-                <div className="text-sm font-semibold text-gray-700 mb-3">
-                  Return • <span className="text-blue-600">{formatDate(firstReturnLeg.flight.departureDate)}</span> <span className="text-purple-600">{formatTime(firstReturnLeg.flight.departureTime)}</span> • <span className="text-orange-600">{formatDuration(returnDuration)}</span>
-                </div>
+                <button
+                  onClick={() => setReturnOpen(!returnOpen)}
+                  className="w-full flex items-center justify-between text-xs font-semibold text-gray-700 mb-2 hover:text-gray-900 transition-colors"
+                >
+                  <span>
+                    Return • <span className="text-blue-600">{formatDate(firstReturnLeg.flight.departureDate)}</span> <span className="text-purple-600">{formatTime(firstReturnLeg.flight.departureTime)}</span> • <span className="text-orange-600">{formatDuration(returnDuration)}</span>
+                  </span>
+                  <span className="text-gray-400 text-xs">{returnOpen ? '▼' : '▶'}</span>
+                </button>
               );
             })()}
-            <div className="space-y-3">
-              {returnLegs.map((leg, idx) => (
-                <div key={leg.id} className="pl-4 border-l-2 border-green-200">
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <div className="font-semibold">{leg.flight.airline}</div>
-                        <div className="text-sm text-gray-600">{leg.flight.flightNumber}</div>
-                        <div className="text-xs text-orange-600">
-                          {formatDuration(leg.flight.duration)}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4 text-sm">
-                        <div>
-                          <div className="font-semibold text-purple-600">{formatTime(leg.flight.departureTime)}</div>
-                          <div className="text-gray-600">{leg.flight.origin}</div>
-                          <div className="text-xs text-blue-600">{formatDate(leg.flight.departureDate)}</div>
-                        </div>
-                        <div className="flex-1 text-center text-gray-400">→</div>
-                        <div>
-                          <div className="font-semibold text-purple-600">{formatTime(leg.flight.arrivalTime)}</div>
-                          <div className="text-gray-600">{leg.flight.destination}</div>
-                          <div className="text-xs text-blue-600">{formatDate(leg.flight.arrivalDate)}</div>
-                        </div>
+            {returnOpen && (
+              <div className="space-y-2">
+                {returnLegs.map((leg, idx) => (
+                  <div key={leg.id} className="pl-3 border-l-2 border-green-200">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="text-xs font-semibold">{leg.flight.airline}</div>
+                      <div className="text-xs text-gray-500">{leg.flight.flightNumber}</div>
+                      <div className="text-xs text-orange-600">
+                        {formatDuration(leg.flight.duration)}
                       </div>
                     </div>
+                    <div className="flex items-center gap-3 text-xs">
+                      <div className="flex items-center gap-1">
+                        <span className="font-semibold text-purple-600">{formatTime(leg.flight.departureTime)}</span>
+                        <span className="text-gray-600">{leg.flight.origin}</span>
+                      </div>
+                      <span className="text-gray-400">→</span>
+                      <div className="flex items-center gap-1">
+                        <span className="font-semibold text-purple-600">{formatTime(leg.flight.arrivalTime)}</span>
+                        <span className="text-gray-600">{leg.flight.destination}</span>
+                      </div>
+                    </div>
+                    {leg.connectionTime !== null && idx < returnLegs.length - 1 && (
+                      <div className="mt-1 text-xs text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded inline-block">
+                        Wait: {Math.floor(leg.connectionTime / 60)}h {leg.connectionTime % 60}m at {leg.flight.destination}
+                      </div>
+                    )}
                   </div>
-                  {leg.connectionTime !== null && idx < returnLegs.length - 1 && (
-                    <div className="mt-3 text-xs text-orange-600 bg-orange-50 px-2 py-1 rounded inline-block">
-                      Wait time: {Math.floor(leg.connectionTime / 60)}h {leg.connectionTime % 60}m at {leg.flight.destination}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -654,69 +724,21 @@ function FlightsPage() {
 
         {!searchingLoading && tripsWithDeals.length > 0 && (
           <div>
-            <div className="flex items-center justify-end mb-4">
-              <div className="text-sm text-gray-600">
-                Showing {startIndex + 1}-{Math.min(endIndex, tripsWithDeals.length)} of {tripsWithDeals.length}
-              </div>
+            {/* Pagination Controls - Top */}
+            <div className="mb-3">
+              <PaginationControls />
             </div>
-            <div className="space-y-4">
+            
+            <div className="space-y-3">
               {paginatedTrips.map((trip) => (
                 <TripCard key={trip.tripId} trip={trip} />
               ))}
             </div>
             
-            {/* Pagination Controls */}
-            {totalPages > 1 && (
-              <div className="flex items-center justify-center gap-2 mt-8">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPage(currentPage - 1)}
-                  disabled={currentPage === 1}
-                >
-                  Previous
-                </Button>
-                
-                <div className="flex items-center gap-1">
-                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => {
-                    // Show first page, last page, current page, and pages around current
-                    const showPage = 
-                      pageNum === 1 ||
-                      pageNum === totalPages ||
-                      (pageNum >= currentPage - 1 && pageNum <= currentPage + 1)
-                    
-                    if (!showPage) {
-                      // Show ellipsis
-                      if (pageNum === currentPage - 2 || pageNum === currentPage + 2) {
-                        return <span key={pageNum} className="px-2">...</span>
-                      }
-                      return null
-                    }
-                    
-                    return (
-                      <Button
-                        key={pageNum}
-                        variant={currentPage === pageNum ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => setPage(pageNum)}
-                        className="min-w-10"
-                      >
-                        {pageNum}
-                      </Button>
-                    )
-                  })}
-                </div>
-                
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPage(currentPage + 1)}
-                  disabled={currentPage === totalPages}
-                >
-                  Next
-                </Button>
-              </div>
-            )}
+            {/* Pagination Controls - Bottom */}
+            <div className="mt-4">
+              <PaginationControls />
+            </div>
           </div>
         )}
 
