@@ -2,70 +2,17 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useState, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { z } from 'zod'
-
-const flightsSearchSchema = z.object({
-  origin: z.string().optional(),
-  destination: z.string().optional(),
-  departureDate: z.string().optional(),
-  returnDate: z.string().optional(),
-  isRoundTrip: z.union([z.string(), z.boolean()]).optional().transform((val) => {
-    if (typeof val === 'boolean') return val
-    return val === 'true'
-  }),
-  page: z.union([z.string(), z.number()]).optional().transform((val) => {
-    if (!val) return 1
-    const num = typeof val === 'number' ? val : parseInt(val, 10)
-    return isNaN(num) || num < 1 ? 1 : num
-  }),
-})
+import { flightsSearchSchema } from '@/schemas/flights'
+import type { TripWithDeals } from '@/types/flights'
+import { TripCard } from '@/components/TripCard'
+import { PaginationControls } from '@/components/PaginationControls'
+import { DealsModal } from '@/components/DealsModal'
+import { formatLastFetched } from '@/utils/flight-utils'
 
 export const Route = createFileRoute('/flights')({
   component: FlightsPage,
   validateSearch: flightsSearchSchema,
 })
-
-interface Flight {
-  id: string
-  flightNumber: string
-  airline: string
-  origin: string
-  destination: string
-  departureDate: string
-  departureTime: string
-  arrivalDate: string
-  arrivalTime: string
-  duration: number
-}
-
-interface Leg {
-  id: string
-  inbound: boolean
-  connectionTime: number | null
-  flight: Flight
-}
-
-interface TripWithDeals {
-  tripId: string
-  origin: string
-  destination: string
-  stopCount: number
-  duration: number
-  isRound: boolean
-  departureDate: string
-  departureTime: string
-  returnDate: string | null
-  returnTime: string | null
-  legs: Leg[]
-  deals: Array<{
-    id: string
-    source: string
-    provider: string
-    price: number
-    link: string
-    expiryDate: string
-  }>
-}
 
 function FlightsPage() {
   const navigate = Route.useNavigate()
@@ -75,10 +22,16 @@ function FlightsPage() {
   const origin = search.origin || ''
   const destination = search.destination || ''
   const departureDate = search.departureDate || ''
+  const departureDateEnd = search.departureDateEnd || ''
   const returnDate = search.returnDate || ''
+  const returnDateEnd = search.returnDateEnd || ''
   const isRoundTrip = search.isRoundTrip || false
   const currentPage = search.page || 1
   const itemsPerPage = 10
+  
+  // Range mode states
+  const departureRangeMode = !!departureDateEnd
+  const returnRangeMode = !!returnDateEnd
   
   const [loading, setLoading] = useState(false)
   const [searchingLoading, setSearchingLoading] = useState(false)
@@ -98,7 +51,7 @@ function FlightsPage() {
   // Reset to page 1 when search params change (but not when just page changes)
   const prevSearchKey = useRef<string>('')
   useEffect(() => {
-    const searchKey = `${origin}|${destination}|${departureDate}|${returnDate}|${isRoundTrip}`
+    const searchKey = `${origin}|${destination}|${departureDate}|${departureDateEnd}|${returnDate}|${returnDateEnd}|${isRoundTrip}`
     if (searchKey !== prevSearchKey.current && prevSearchKey.current !== '') {
       // Search params changed, reset to page 1
       if (currentPage !== 1) {
@@ -113,73 +66,56 @@ function FlightsPage() {
     }
     prevSearchKey.current = searchKey
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [origin, destination, departureDate, returnDate, isRoundTrip])
+  }, [origin, destination, departureDate, departureDateEnd, returnDate, returnDateEnd, isRoundTrip])
 
   const setPage = (page: number) => {
     updateSearchParams({ page: page.toString() })
   }
 
-  // Pagination controls component
-  const PaginationControls = () => {
-    return (
-      <div className="flex items-center justify-between gap-4">
-        <div className="text-sm text-gray-600">
-          Showing {startIndex + 1}-{Math.min(endIndex, tripsWithDeals.length)} of {tripsWithDeals.length}
-        </div>
-        
-        {totalPages > 1 && (
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setPage(currentPage - 1)}
-              disabled={currentPage === 1}
-            >
-              Previous
-            </Button>
-            
-            <div className="flex items-center gap-1">
-              {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => {
-                // Show first page, last page, current page, and pages around current
-                const showPage = 
-                  pageNum === 1 ||
-                  pageNum === totalPages ||
-                  (pageNum >= currentPage - 1 && pageNum <= currentPage + 1)
-                
-                if (!showPage) {
-                  // Show ellipsis
-                  if (pageNum === currentPage - 2 || pageNum === currentPage + 2) {
-                    return <span key={pageNum} className="px-2">...</span>
-                  }
-                  return null
-                }
-                
-                return (
-                  <Button
-                    key={pageNum}
-                    variant={currentPage === pageNum ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setPage(pageNum)}
-                    className="min-w-10"
-                  >
-                    {pageNum}
-                  </Button>
-                )
-              })}
-            </div>
-            
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setPage(currentPage + 1)}
-              disabled={currentPage === totalPages}
-            >
-              Next
-            </Button>
-          </div>
-        )}
-      </div>
-    )
+  // Generate all date combinations from ranges
+  const generateDateCombinations = () => {
+    const departureDates: string[] = []
+    const returnDates: string[] = []
+    
+    // Generate departure dates
+    if (departureDate) {
+      if (departureRangeMode && departureDateEnd) {
+        const start = new Date(departureDate)
+        const end = new Date(departureDateEnd)
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+          departureDates.push(d.toISOString().split('T')[0])
+        }
+      } else {
+        departureDates.push(departureDate)
+      }
+    }
+    
+    // Generate return dates (only if round trip)
+    if (isRoundTrip && returnDate) {
+      if (returnRangeMode && returnDateEnd) {
+        const start = new Date(returnDate)
+        const end = new Date(returnDateEnd)
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+          returnDates.push(d.toISOString().split('T')[0])
+        }
+      } else {
+        returnDates.push(returnDate)
+      }
+    }
+    
+    // Generate all combinations
+    const combinations: Array<{ departureDate: string; returnDate?: string }> = []
+    for (const depDate of departureDates) {
+      if (returnDates.length > 0) {
+        for (const retDate of returnDates) {
+          combinations.push({ departureDate: depDate, returnDate: retDate })
+        }
+      } else {
+        combinations.push({ departureDate: depDate })
+      }
+    }
+    
+    return combinations
   }
 
   // Update URL when form values change
@@ -187,7 +123,9 @@ function FlightsPage() {
     origin?: string
     destination?: string
     departureDate?: string
+    departureDateEnd?: string
     returnDate?: string
+    returnDateEnd?: string
     isRoundTrip?: boolean
     page?: string | number
   }) => {
@@ -201,11 +139,21 @@ function FlightsPage() {
         if (updates.isRoundTrip !== undefined) {
           newSearch.isRoundTrip = updates.isRoundTrip ? 'true' : undefined
         }
-        // Remove returnDate if not round trip
+        // Remove returnDate and returnDateEnd if not round trip
         if (updates.isRoundTrip === false) {
           newSearch.returnDate = undefined
-        } else if (updates.returnDate !== undefined) {
-          newSearch.returnDate = updates.returnDate
+          newSearch.returnDateEnd = undefined
+        } else {
+          if (updates.returnDate !== undefined) {
+            newSearch.returnDate = updates.returnDate
+          }
+          if (updates.returnDateEnd !== undefined) {
+            newSearch.returnDateEnd = updates.returnDateEnd
+          }
+        }
+        // Handle departureDateEnd
+        if (updates.departureDateEnd !== undefined) {
+          newSearch.departureDateEnd = updates.departureDateEnd || undefined
         }
         // Handle page parameter
         if (updates.page !== undefined) {
@@ -220,12 +168,36 @@ function FlightsPage() {
   const setOrigin = (value: string) => updateSearchParams({ origin: value })
   const setDestination = (value: string) => updateSearchParams({ destination: value })
   const setDepartureDate = (value: string) => updateSearchParams({ departureDate: value })
+  const setDepartureDateEnd = (value: string) => updateSearchParams({ departureDateEnd: value })
   const setReturnDate = (value: string) => updateSearchParams({ returnDate: value })
+  const setReturnDateEnd = (value: string) => updateSearchParams({ returnDateEnd: value })
   const setIsRoundTrip = (value: boolean) => {
     updateSearchParams({ 
       isRoundTrip: value,
       returnDate: value ? returnDate : undefined,
+      returnDateEnd: value ? returnDateEnd : undefined,
     })
+  }
+  const setDepartureRangeMode = (enabled: boolean) => {
+    if (enabled) {
+      // Enable range mode - set end date to start date if not set
+      updateSearchParams({ departureDateEnd: departureDateEnd || departureDate })
+    } else {
+      // Disable range mode - remove end date
+      updateSearchParams({ departureDateEnd: undefined })
+    }
+  }
+  const setReturnRangeMode = (enabled: boolean) => {
+    if (!isRoundTrip) return // Don't allow enabling if round trip is not selected
+    
+    if (enabled) {
+      // Enable range mode - set end date to start date if not set, or use a default
+      const endDate = returnDateEnd || returnDate || departureDate || new Date().toISOString().split('T')[0]
+      updateSearchParams({ returnDateEnd: endDate })
+    } else {
+      // Disable range mode - remove end date
+      updateSearchParams({ returnDateEnd: undefined })
+    }
   }
 
   // Validate search parameters
@@ -244,6 +216,18 @@ function FlightsPage() {
     if (!dateRegex.test(departureDate)) {
       return 'Departure date must be in YYYY-MM-DD format'
     }
+    // Validate departure date range
+    if (departureRangeMode) {
+      if (!departureDateEnd) {
+        return 'Departure end date is required when range mode is enabled'
+      }
+      if (!dateRegex.test(departureDateEnd)) {
+        return 'Departure end date must be in YYYY-MM-DD format'
+      }
+      if (new Date(departureDateEnd) < new Date(departureDate)) {
+        return 'Departure end date must be after start date'
+      }
+    }
     // If round trip, validate return date
     if (isRoundTrip) {
       if (!returnDate) {
@@ -252,8 +236,22 @@ function FlightsPage() {
       if (!dateRegex.test(returnDate)) {
         return 'Return date must be in YYYY-MM-DD format'
       }
-      // Validate return date is after departure date
-      if (new Date(returnDate) < new Date(departureDate)) {
+      // Validate return date range
+      if (returnRangeMode) {
+        if (!returnDateEnd) {
+          return 'Return end date is required when range mode is enabled'
+        }
+        if (!dateRegex.test(returnDateEnd)) {
+          return 'Return end date must be in YYYY-MM-DD format'
+        }
+        if (new Date(returnDateEnd) < new Date(returnDate)) {
+          return 'Return end date must be after start date'
+        }
+      }
+      // Validate return date is after departure date (check earliest departure vs earliest return)
+      const earliestDeparture = departureDate
+      const earliestReturn = returnDate
+      if (new Date(earliestReturn) < new Date(earliestDeparture)) {
         return 'Return date must be after departure date'
       }
     }
@@ -262,8 +260,8 @@ function FlightsPage() {
 
   // Auto-search when URL params are present, valid, and have changed
   useEffect(() => {
-    // Create a key from the search params
-    const searchKey = `${origin}|${destination}|${departureDate}|${returnDate}|${isRoundTrip}`
+    // Create a key from the search params (include range dates)
+    const searchKey = `${origin}|${destination}|${departureDate}|${departureDateEnd}|${returnDate}|${returnDateEnd}|${isRoundTrip}`
     
     // Validate before attempting to search
     const validationError = validateSearchParams()
@@ -293,7 +291,7 @@ function FlightsPage() {
       handleSearchOnly()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [origin, destination, departureDate, returnDate, isRoundTrip, loading, searchingLoading])
+  }, [origin, destination, departureDate, departureDateEnd, returnDate, returnDateEnd, isRoundTrip, loading, searchingLoading])
 
   // Search only (query database, no scraping)
   const handleSearchOnly = async () => {
@@ -308,18 +306,28 @@ function FlightsPage() {
     setError('')
 
     try {
+      // Use range endpoint if ranges are enabled, otherwise use regular endpoint
+      const useRangeEndpoint = departureRangeMode || returnRangeMode
+      const endpoint = useRangeEndpoint ? '/api/flights/search-range' : '/api/flights/search'
+      
       const requestBody: any = {
         origin,
         destination,
         departureDate,
       }
 
-      if (isRoundTrip && returnDate) {
-        requestBody.returnDate = returnDate
+      if (departureRangeMode && departureDateEnd) {
+        requestBody.departureDateEnd = departureDateEnd
       }
 
-      // Fetch the results from the database
-      const searchResponse = await fetch('/api/flights/search', {
+      if (isRoundTrip && returnDate) {
+        requestBody.returnDate = returnDate
+        if (returnRangeMode && returnDateEnd) {
+          requestBody.returnDateEnd = returnDateEnd
+        }
+      }
+
+      const searchResponse = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -353,7 +361,7 @@ function FlightsPage() {
     }
 
     // Update the last searched params
-    const searchKey = `${origin}|${destination}|${departureDate}|${returnDate}|${isRoundTrip}`
+    const searchKey = `${origin}|${destination}|${departureDate}|${departureDateEnd}|${returnDate}|${returnDateEnd}|${isRoundTrip}`
     lastSearchedParams.current = searchKey
 
     setLoading(true)
@@ -361,18 +369,30 @@ function FlightsPage() {
     setTripsWithDeals([])
 
     try {
+      // Use range endpoint if ranges are enabled, otherwise use regular endpoint
+      const useRangeEndpoint = departureRangeMode || returnRangeMode
+      const scrapeEndpoint = useRangeEndpoint ? '/api/flights/scrape-range' : '/api/flights/scrape'
+      const searchEndpoint = useRangeEndpoint ? '/api/flights/search-range' : '/api/flights/search'
+      
       const requestBody: any = {
         origin,
         destination,
         departureDate,
       }
 
+      if (departureRangeMode && departureDateEnd) {
+        requestBody.departureDateEnd = departureDateEnd
+      }
+
       if (isRoundTrip && returnDate) {
         requestBody.returnDate = returnDate
+        if (returnRangeMode && returnDateEnd) {
+          requestBody.returnDateEnd = returnDateEnd
+        }
       }
 
       // First, call the scraper endpoint to scrape flights from Skyscanner
-      const scrapeResponse = await fetch('/api/flights/scrape', {
+      const scrapeResponse = await fetch(scrapeEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -388,7 +408,7 @@ function FlightsPage() {
       }
 
       // After scraping, fetch the results from the database
-      const searchResponse = await fetch('/api/flights/search', {
+      const searchResponse = await fetch(searchEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -410,45 +430,6 @@ function FlightsPage() {
     } finally {
       setLoading(false)
     }
-  }
-
-  const formatLastFetched = (timestamp: string | null) => {
-    if (!timestamp) return null
-    const date = new Date(timestamp)
-    const now = new Date()
-    const diffMs = now.getTime() - date.getTime()
-    const diffMins = Math.floor(diffMs / 60000)
-    const diffHours = Math.floor(diffMs / 3600000)
-    const diffDays = Math.floor(diffMs / 86400000)
-    
-    if (diffMins < 1) return 'Just now'
-    if (diffMins < 60) return `${diffMins}m ago`
-    if (diffHours < 24) return `${diffHours}h ago`
-    if (diffDays < 7) return `${diffDays}d ago`
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined })
-  }
-
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString)
-    return date.toLocaleDateString('en-US', { 
-      month: 'short', 
-      day: 'numeric' 
-    })
-  }
-
-  const formatTime = (timeString: string) => {
-    // Remove seconds if present (format: HH:MM:SS -> HH:MM)
-    if (timeString && timeString.includes(':')) {
-      const parts = timeString.split(':')
-      return `${parts[0]}:${parts[1]}`
-    }
-    return timeString
-  }
-
-  const formatDuration = (minutes: number) => {
-    const hours = Math.floor(minutes / 60)
-    const mins = minutes % 60
-    return `${hours}h ${mins}m`
   }
 
   const handleClearTables = async () => {
@@ -482,155 +463,6 @@ function FlightsPage() {
     } finally {
       setClearing(false)
     }
-  }
-
-  const TripCard = ({ trip }: { trip: TripWithDeals }) => {
-    const [outboundOpen, setOutboundOpen] = useState(false)
-    const [returnOpen, setReturnOpen] = useState(false)
-    
-    const minPrice = Math.min(...trip.deals.map(d => d.price))
-    const outboundLegs = trip.legs.filter(leg => !leg.inbound)
-    const returnLegs = trip.legs.filter(leg => leg.inbound)
-
-    return (
-      <div className="border rounded-lg p-4 hover:shadow-lg transition-shadow bg-white">
-        {/* Header with trip info */}
-        <div className="mb-3 pb-3 border-b">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-3">
-              <div className="text-base font-semibold">
-                {trip.isRound ? (
-                  <>{trip.origin} ⇄ {trip.destination}</>
-                ) : (
-                  <>{trip.origin} → {trip.destination}</>
-                )}
-              </div>
-              <div className="text-xs text-gray-500">
-                {trip.stopCount === 0 ? 'Direct' : `${trip.stopCount} stop${trip.stopCount > 1 ? 's' : ''}`}
-              </div>
-            </div>
-            <div className="text-right">
-              <button
-                onClick={() => setSelectedTripForDeals(trip)}
-                className="text-xl font-bold text-green-600 hover:text-green-700 cursor-pointer transition-colors"
-              >
-                ${minPrice}
-              </button>
-              <div className="text-xs text-gray-500 cursor-pointer hover:text-gray-700" onClick={() => setSelectedTripForDeals(trip)}>
-                {trip.deals.length} deal{trip.deals.length > 1 ? 's' : ''}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Outbound Legs */}
-        {outboundLegs.length > 0 && (
-          <div className="mb-3">
-            {(() => {
-              const outboundDuration = outboundLegs.reduce((total, leg) => total + leg.flight.duration, 0) +
-                outboundLegs.reduce((total, leg) => total + (leg.connectionTime || 0), 0);
-              const firstOutboundLeg = outboundLegs[0];
-              return (
-                <button
-                  onClick={() => setOutboundOpen(!outboundOpen)}
-                  className="w-full flex items-center justify-between text-xs font-semibold text-gray-700 mb-2 hover:text-gray-900 transition-colors"
-                >
-                  <span>
-                    Outbound • <span className="text-blue-600">{formatDate(firstOutboundLeg.flight.departureDate)}</span> <span className="text-purple-600">{formatTime(firstOutboundLeg.flight.departureTime)}</span> • <span className="text-orange-600">{formatDuration(outboundDuration)}</span>
-                  </span>
-                  <span className="text-gray-400 text-xs">{outboundOpen ? '▼' : '▶'}</span>
-                </button>
-              );
-            })()}
-            {outboundOpen && (
-              <div className="space-y-2">
-                {outboundLegs.map((leg, idx) => (
-                  <div key={leg.id} className="pl-3 border-l-2 border-blue-200">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="text-xs font-semibold">{leg.flight.airline}</div>
-                      <div className="text-xs text-gray-500">{leg.flight.flightNumber}</div>
-                      <div className="text-xs text-orange-600">
-                        {formatDuration(leg.flight.duration)}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3 text-xs">
-                      <div className="flex items-center gap-1">
-                        <span className="font-semibold text-purple-600">{formatTime(leg.flight.departureTime)}</span>
-                        <span className="text-gray-600">{leg.flight.origin}</span>
-                      </div>
-                      <span className="text-gray-400">→</span>
-                      <div className="flex items-center gap-1">
-                        <span className="font-semibold text-purple-600">{formatTime(leg.flight.arrivalTime)}</span>
-                        <span className="text-gray-600">{leg.flight.destination}</span>
-                      </div>
-                    </div>
-                    {leg.connectionTime !== null && idx < outboundLegs.length - 1 && (
-                      <div className="mt-1 text-xs text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded inline-block">
-                        Wait: {Math.floor(leg.connectionTime / 60)}h {leg.connectionTime % 60}m at {leg.flight.destination}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Return Legs */}
-        {returnLegs.length > 0 && (
-          <div className="mb-3">
-            {(() => {
-              const returnDuration = returnLegs.reduce((total, leg) => total + leg.flight.duration, 0) +
-                returnLegs.reduce((total, leg) => total + (leg.connectionTime || 0), 0);
-              const firstReturnLeg = returnLegs[0];
-              return (
-                <button
-                  onClick={() => setReturnOpen(!returnOpen)}
-                  className="w-full flex items-center justify-between text-xs font-semibold text-gray-700 mb-2 hover:text-gray-900 transition-colors"
-                >
-                  <span>
-                    Return • <span className="text-blue-600">{formatDate(firstReturnLeg.flight.departureDate)}</span> <span className="text-purple-600">{formatTime(firstReturnLeg.flight.departureTime)}</span> • <span className="text-orange-600">{formatDuration(returnDuration)}</span>
-                  </span>
-                  <span className="text-gray-400 text-xs">{returnOpen ? '▼' : '▶'}</span>
-                </button>
-              );
-            })()}
-            {returnOpen && (
-              <div className="space-y-2">
-                {returnLegs.map((leg, idx) => (
-                  <div key={leg.id} className="pl-3 border-l-2 border-green-200">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="text-xs font-semibold">{leg.flight.airline}</div>
-                      <div className="text-xs text-gray-500">{leg.flight.flightNumber}</div>
-                      <div className="text-xs text-orange-600">
-                        {formatDuration(leg.flight.duration)}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3 text-xs">
-                      <div className="flex items-center gap-1">
-                        <span className="font-semibold text-purple-600">{formatTime(leg.flight.departureTime)}</span>
-                        <span className="text-gray-600">{leg.flight.origin}</span>
-                      </div>
-                      <span className="text-gray-400">→</span>
-                      <div className="flex items-center gap-1">
-                        <span className="font-semibold text-purple-600">{formatTime(leg.flight.arrivalTime)}</span>
-                        <span className="text-gray-600">{leg.flight.destination}</span>
-                      </div>
-                    </div>
-                    {leg.connectionTime !== null && idx < returnLegs.length - 1 && (
-                      <div className="mt-1 text-xs text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded inline-block">
-                        Wait: {Math.floor(leg.connectionTime / 60)}h {leg.connectionTime % 60}m at {leg.flight.destination}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-      </div>
-    )
   }
 
   return (
@@ -676,24 +508,87 @@ function FlightsPage() {
             </div>
             
             <div>
-              <label className="block text-sm font-medium mb-2">Departure Date</label>
+              <div className="flex items-center gap-2 mb-2">
+                <input
+                  type="checkbox"
+                  id="departure-range-checkbox"
+                  checked={departureRangeMode}
+                  onChange={(e) => setDepartureRangeMode(e.target.checked)}
+                  className="w-4 h-4"
+                />
+                <label 
+                  htmlFor="departure-range-checkbox"
+                  className="block text-sm font-medium cursor-pointer"
+                >
+                  Departure Date{departureRangeMode ? ' Range' : ''}
+                </label>
+              </div>
+              <div className="flex gap-2">
               <Input
                 type="date"
                 value={departureDate}
                 onChange={(e) => setDepartureDate(e.target.value)}
                 min={new Date().toISOString().split('T')[0]}
-              />
+                  placeholder="Start"
+                />
+                {departureRangeMode && (
+                  <Input
+                    type="date"
+                    value={departureDateEnd}
+                    onChange={(e) => setDepartureDateEnd(e.target.value)}
+                    min={departureDate || new Date().toISOString().split('T')[0]}
+                    placeholder="End"
+                  />
+                )}
+              </div>
             </div>
             
             <div>
-              <label className="block text-sm font-medium mb-2">Return Date (Optional)</label>
+              <div className="flex items-center gap-2 mb-2">
+                <input
+                  type="checkbox"
+                  id="return-range-checkbox"
+                  checked={returnRangeMode}
+                  onChange={(e) => {
+                    if (isRoundTrip) {
+                      setReturnRangeMode(e.target.checked)
+                    }
+                  }}
+                  disabled={!isRoundTrip}
+                  className="w-4 h-4"
+                />
+                <label 
+                  htmlFor="return-range-checkbox"
+                  className={`block text-sm font-medium ${isRoundTrip ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
+                  onClick={(e) => {
+                    if (!isRoundTrip) {
+                      e.preventDefault()
+                    }
+                  }}
+                >
+                  Return Date{returnRangeMode ? ' Range' : ''} {!isRoundTrip && '(Enable Round trip first)'}
+                </label>
+              </div>
+              <div className="flex gap-2">
               <Input
                 type="date"
                 value={returnDate}
                 onChange={(e) => setReturnDate(e.target.value)}
                 min={departureDate || new Date().toISOString().split('T')[0]}
                 disabled={!isRoundTrip}
-              />
+                  placeholder="Start"
+                />
+                {returnRangeMode && isRoundTrip && (
+                  <Input
+                    type="date"
+                    value={returnDateEnd}
+                    onChange={(e) => setReturnDateEnd(e.target.value)}
+                    min={returnDate || departureDate || new Date().toISOString().split('T')[0]}
+                    disabled={!isRoundTrip}
+                    placeholder="End"
+                  />
+                )}
+              </div>
             </div>
           </div>
           
@@ -715,13 +610,13 @@ function FlightsPage() {
           </div>
           
           <div className="flex items-center gap-3">
-            <Button 
-              onClick={handleSearch} 
+          <Button 
+            onClick={handleSearch} 
               disabled={loading || clearing}
-              className="w-full md:w-auto"
-            >
+            className="w-full md:w-auto"
+          >
               {loading ? 'Fetching...' : 'Fetch'}
-            </Button>
+          </Button>
             {lastFetched && (
               <span className="text-xs text-gray-500">
                 Last fetched: {formatLastFetched(lastFetched)}
@@ -752,18 +647,36 @@ function FlightsPage() {
           <div>
             {/* Pagination Controls - Top */}
             <div className="mb-3">
-              <PaginationControls />
+              <PaginationControls
+                currentPage={currentPage}
+                totalPages={totalPages}
+                startIndex={startIndex}
+                endIndex={endIndex}
+                totalItems={tripsWithDeals.length}
+                onPageChange={setPage}
+              />
             </div>
             
             <div className="space-y-3">
               {paginatedTrips.map((trip) => (
-                <TripCard key={trip.tripId} trip={trip} />
+                <TripCard 
+                  key={trip.tripId} 
+                  trip={trip}
+                  onSelectForDeals={setSelectedTripForDeals}
+                />
               ))}
             </div>
             
             {/* Pagination Controls - Bottom */}
             <div className="mt-4">
-              <PaginationControls />
+              <PaginationControls
+                currentPage={currentPage}
+                totalPages={totalPages}
+                startIndex={startIndex}
+                endIndex={endIndex}
+                totalItems={tripsWithDeals.length}
+                onPageChange={setPage}
+              />
             </div>
           </div>
         )}
@@ -774,69 +687,12 @@ function FlightsPage() {
           </div>
         )}
 
-        {/* Deals Popup Modal */}
+        {/* Deals Modal */}
         {selectedTripForDeals && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-              <div className="sticky top-0 bg-white border-b p-4 flex justify-between items-center">
-                <div>
-                  <h2 className="text-xl font-bold">Available Deals</h2>
-                  <div className="text-sm text-gray-600">
-                    {selectedTripForDeals.isRound ? (
-                      <>{selectedTripForDeals.origin} ⇄ {selectedTripForDeals.destination}</>
-                    ) : (
-                      <>{selectedTripForDeals.origin} → {selectedTripForDeals.destination}</>
-                    )}
-                  </div>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setSelectedTripForDeals(null)}
-                >
-                  ✕
-                </Button>
-              </div>
-              
-              <div className="p-4">
-                <div className="space-y-2">
-                  {selectedTripForDeals.deals.map((deal) => {
-                    const minPrice = Math.min(...selectedTripForDeals.deals.map(d => d.price))
-                    
-                    return (
-                      <div key={deal.id} className="border rounded p-3 hover:shadow-sm transition-shadow">
-                        <div className="flex justify-between items-center">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2">
-                              <div className="font-semibold">{deal.provider}</div>
-                              <div className="text-xs text-gray-500">• {deal.source}</div>
-                              {deal.price === minPrice && (
-                                <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">Best</span>
-                              )}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <div className="text-right">
-                              <div className="text-xl font-bold text-green-600">${deal.price}</div>
-                            </div>
-                            <a
-                              href={deal.link}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              <Button size="sm" variant="default">
-                                View Deal
-                              </Button>
-                            </a>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            </div>
-          </div>
+          <DealsModal
+            trip={selectedTripForDeals}
+            onClose={() => setSelectedTripForDeals(null)}
+          />
         )}
       </div>
     </div>

@@ -1,7 +1,7 @@
 import type { ApiRouteConfig, Handlers } from 'motia';
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
-import { createHash } from 'crypto';
+import { generateQueryId } from '../src/utils/query-id';
 
 const flightSearchSchema = z.object({
   origin: z.string().min(3, 'Origin must be at least 3 characters'),
@@ -9,12 +9,6 @@ const flightSearchSchema = z.object({
   departureDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Departure date must be in YYYY-MM-DD format'),
   returnDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Return date must be in YYYY-MM-DD format').optional(),
 });
-
-// Generate a deterministic ID from search parameters
-function generateQueryId(origin: string, destination: string, departureDate: string, returnDate?: string): string {
-  const params = `${origin.toUpperCase()}|${destination.toUpperCase()}|${departureDate}|${returnDate || ''}`;
-  return createHash('sha256').update(params).digest('hex');
-}
 
 export const config: ApiRouteConfig = {
   name: 'FlightSearch',
@@ -63,7 +57,6 @@ export const config: ApiRouteConfig = {
           provider: z.string(),
           price: z.number(),
           link: z.string(),
-          expiryDate: z.string(),
         })),
       })),
     }),
@@ -114,9 +107,10 @@ export const handler: Handlers['FlightSearch'] = async (req, { logger }) => {
     const lastFetched = fetchQueryData?.last_fetched || null;
 
     // Query deals filtered by search criteria
+    // Select only needed columns to reduce data transfer
     let dealsQuery = supabase
       .from('deals')
-      .select('*')
+      .select('id, trip, origin, destination, stop_count, duration, is_round, departure_date, departure_time, return_date, return_time, source, provider, price, link')
       .eq('origin', origin.toUpperCase())
       .eq('destination', destination.toUpperCase())
       .eq('departure_date', departureDate);
@@ -182,7 +176,6 @@ export const handler: Handlers['FlightSearch'] = async (req, { logger }) => {
         provider: deal.provider,
         price: deal.price,
         link: deal.link,
-        expiryDate: deal.updated_at ? new Date(deal.updated_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
       });
     }
 
